@@ -102,25 +102,25 @@ class VideoEngine:
             composed = work / "composed.mp4"
             final_out = output_dir / f"{input_video.stem}_processed.mp4"
 
-            self.log("  Step 1/6: Extract audio")
+            self.log("  Bước 1/6: Tách audio")
             self._extract_audio(input_video, audio)
-            self.log("  Step 2/6: Scene detection")
+            self.log("  Bước 2/6: Detect cảnh")
             scenes = self._detect_or_fallback_scenes(input_video, spec.duration)
-            self.log(f"  Detected/Generated segments: {len(scenes)}")
-            self.log("  Step 3/6: Cut segments")
+            self.log(f"  Số segment detect/tạo: {len(scenes)}")
+            self.log("  Bước 3/6: Cắt segment")
             parts = self._cut_segments(input_video, scenes, work)
-            self.log("  Step 4/6: Shuffle + concat")
+            self.log("  Bước 4/6: Shuffle + ghép concat")
             shuffled_parts = self._shuffle_keep_first(parts)
             self._concat_segments(shuffled_parts, shuffled)
 
             if image_file:
-                self.log("  Step 5/6: Compose image + fade layout")
+                self.log("  Bước 5/6: Ghép video + ảnh + fade")
                 self._compose_layout(shuffled, image_file, spec, focus_mode, overlap_pct_of_main, composed)
             else:
-                self.log("  Step 5/6: Skip image compose (no image selected)")
+                self.log("  Bước 5/6: Bỏ qua ghép ảnh (không chọn ảnh)")
                 composed = shuffled
 
-            self.log("  Step 6/6: Mux audio")
+            self.log("  Bước 6/6: Gắn lại audio")
             self._mux_audio(composed, audio, final_out)
             return final_out
         finally:
@@ -151,10 +151,10 @@ class VideoEngine:
             raw = manager.get_scene_list()
             scene_list = [(s[0].get_seconds(), s[1].get_seconds()) for s in raw]
         except Exception as exc:
-            self.log(f"Scene detection warning: {exc}")
+            self.log(f"Cảnh báo detect cảnh: {exc}")
 
         if len(scene_list) <= 1:
-            self.log("Fallback random segments 3-5s")
+            self.log("Không detect đủ cảnh, fallback chia ngẫu nhiên 3-5 giây")
             scene_list = []
             t = 0.0
             while t < duration:
@@ -203,21 +203,22 @@ class VideoEngine:
         else:
             y_expr = "(ih-oh)/2"
 
+        duration = max(0.1, spec.duration)
         filter_complex = (
-            f"[1:v]scale={w}:-1,crop={w}:{image_h}:0:{y_expr}[img];"
-            f"[0:v]crop={w}:{main_h}:0:{offset_main}[main];"
+            f"[1:v]scale={w}:-1,crop={w}:{image_h}:0:{y_expr},trim=duration={duration:.3f}[img];"
+            f"[0:v]crop={w}:{main_h}:0:{offset_main},trim=duration={duration:.3f}[main];"
             f"[main]crop={w}:{overlap_h}:0:{main_h-overlap_h},format=yuva420p,"
             f"geq=lum='p(X,Y)':a='255*(1-Y/{overlap_h})'[fade];"
-            f"color=c=black:s={w}x{h}:d=1[base];"
+            f"color=c=black:s={w}x{h}:d={duration:.3f}[base];"
             f"[base][img]overlay=0:{h-image_h}[tmp1];"
             f"[tmp1][main]overlay=0:0[tmp2];"
             f"[tmp2][fade]overlay=0:{main_h}[v]"
         )
 
         self.runner.run([
-            "-y", "-i", str(video), "-loop", "1", "-i", str(image),
+            "-y", "-i", str(video), "-loop", "1", "-t", f"{duration:.3f}", "-i", str(image),
             "-filter_complex", filter_complex,
-            "-map", "[v]", "-shortest", "-c:v", "libx264", "-preset", "medium", "-crf", "18", str(out)
+            "-map", "[v]", "-t", f"{duration:.3f}", "-shortest", "-c:v", "libx264", "-preset", "medium", "-crf", "18", str(out)
         ], step="compose_layout")
 
     def _mux_audio(self, video: Path, audio: Path, out: Path) -> None:
@@ -242,7 +243,7 @@ class Worker(QThread):
         ok = 0
         fail = 0
         total = len(self.cfg.input_videos)
-        self.log_signal.emit(f"Batch started: {total} videos")
+        self.log_signal.emit(f"Bắt đầu batch: {total} video")
         for i, video in enumerate(self.cfg.input_videos, start=1):
             self.log_signal.emit(f"=== [{i}/{total}] {video.name} ===")
             try:
@@ -251,10 +252,10 @@ class Worker(QThread):
                 self.log_signal.emit(f"OK: {out}")
                 ok += 1
             except Exception as exc:
-                self.log_signal.emit(f"FAIL: {video.name} -> {exc}")
+                self.log_signal.emit(f"LỖI: {video.name} -> {exc}")
                 fail += 1
             self.progress_signal.emit(i, total)
-        self.log_signal.emit("Batch finished")
+        self.log_signal.emit("Kết thúc batch")
         self.done_signal.emit(ok, fail)
 
     def pick_image(self) -> Optional[Path]:
@@ -269,7 +270,7 @@ class Worker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Auto Video Shuffle + Image Compositor")
+        self.setWindowTitle("Xáo Trộn Video + Ghép Ảnh Tự Động")
         self.settings = QSettings("VideoSufle", "AutoShuffle")
         self.worker: Optional[Worker] = None
         self._build_ui()
@@ -279,37 +280,37 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         self.list_widget = QListWidget()
-        layout.addWidget(QLabel("Input videos"))
+        layout.addWidget(QLabel("Danh sách video đầu vào"))
         layout.addWidget(self.list_widget)
 
         row = QHBoxLayout()
-        btn_files = QPushButton("Add Files")
+        btn_files = QPushButton("Thêm file")
         btn_files.clicked.connect(self.add_files)
-        btn_folder = QPushButton("Add Folder")
+        btn_folder = QPushButton("Thêm thư mục")
         btn_folder.clicked.connect(self.add_folder)
-        btn_remove = QPushButton("Remove")
+        btn_remove = QPushButton("Xóa")
         btn_remove.clicked.connect(self.remove_items)
         row.addWidget(btn_files); row.addWidget(btn_folder); row.addWidget(btn_remove)
         layout.addLayout(row)
 
-        self.btn_single_image = QPushButton("Select Single Image")
+        self.btn_single_image = QPushButton("Chọn 1 ảnh")
         self.btn_single_image.clicked.connect(self.select_single_image)
-        self.btn_folder_image = QPushButton("Select Image Folder")
+        self.btn_folder_image = QPushButton("Chọn thư mục ảnh")
         self.btn_folder_image.clicked.connect(self.select_image_folder)
         layout.addWidget(self.btn_single_image)
         layout.addWidget(self.btn_folder_image)
-        self.image_label = QLabel("Image mode: none")
+        self.image_label = QLabel("Chế độ ảnh: không dùng")
         layout.addWidget(self.image_label)
 
         focus_row = QHBoxLayout()
-        focus_row.addWidget(QLabel("Image crop focus"))
+        focus_row.addWidget(QLabel("Điểm crop ảnh"))
         self.focus_combo = QComboBox()
         self.focus_combo.addItems(["center", "top", "bottom"])
         focus_row.addWidget(self.focus_combo)
         layout.addLayout(focus_row)
 
         overlap_row = QHBoxLayout()
-        overlap_row.addWidget(QLabel("Fade overlap (% of main video height)"))
+        overlap_row.addWidget(QLabel("Overlap fade (% chiều cao vùng video chính)"))
         self.overlap_spin = QDoubleSpinBox()
         self.overlap_spin.setRange(1.0, 50.0)
         self.overlap_spin.setDecimals(1)
@@ -318,13 +319,13 @@ class MainWindow(QMainWindow):
         overlap_row.addWidget(self.overlap_spin)
         layout.addLayout(overlap_row)
 
-        self.auto_open = QCheckBox("Auto open output folder after processing")
+        self.auto_open = QCheckBox("Tự mở thư mục output sau khi xử lý")
         layout.addWidget(self.auto_open)
 
         out_row = QHBoxLayout()
-        self.btn_out = QPushButton("Select Output Folder")
+        self.btn_out = QPushButton("Chọn thư mục output")
         self.btn_out.clicked.connect(self.select_output)
-        self.btn_open_out = QPushButton("Open Output")
+        self.btn_open_out = QPushButton("Mở output")
         self.btn_open_out.clicked.connect(self.open_output)
         out_row.addWidget(self.btn_out); out_row.addWidget(self.btn_open_out)
         layout.addLayout(out_row)
@@ -334,7 +335,7 @@ class MainWindow(QMainWindow):
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True)
         layout.addWidget(self.log_box)
 
-        self.btn_start = QPushButton("Start Batch")
+        self.btn_start = QPushButton("Bắt đầu batch")
         self.btn_start.clicked.connect(self.start_batch)
         layout.addWidget(self.btn_start)
 
@@ -345,12 +346,12 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def add_files(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(self, "Choose Videos", "", "Video (*.mp4 *.mov *.avi *.mkv)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Chọn video", "", "Video (*.mp4 *.mov *.avi *.mkv)")
         for f in files:
             self.list_widget.addItem(QListWidgetItem(f))
 
     def add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Choose Folder")
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục")
         if not folder:
             return
         for p in Path(folder).iterdir():
@@ -366,35 +367,35 @@ class MainWindow(QMainWindow):
         self.list_widget.clear()
 
     def select_single_image(self) -> None:
-        file, _ = QFileDialog.getOpenFileName(self, "Choose Image", "", "Image (*.jpg *.jpeg *.png *.webp)")
+        file, _ = QFileDialog.getOpenFileName(self, "Chọn ảnh", "", "Image (*.jpg *.jpeg *.png *.webp)")
         if file:
             self.single_image = Path(file)
             self.image_folder = None
-            self.image_label.setText(f"Image mode: single ({self.single_image.name})")
+            self.image_label.setText(f"Chế độ ảnh: 1 ảnh ({self.single_image.name})")
 
     def select_image_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Choose Image Folder")
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục ảnh")
         if folder:
             self.image_folder = Path(folder)
             self.single_image = None
-            self.image_label.setText(f"Image mode: folder ({self.image_folder})")
+            self.image_label.setText(f"Chế độ ảnh: thư mục ({self.image_folder})")
 
     def select_output(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Choose Output Folder")
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục output")
         if folder:
             self.output_dir = Path(folder)
 
     def open_output(self) -> None:
         path = self.settings.value("last_openable_output", "", str)
         if not path or not Path(path).exists():
-            QMessageBox.warning(self, "Missing", "Output folder not found.")
+            QMessageBox.warning(self, "Thiếu dữ liệu", "Không tìm thấy thư mục output.")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def start_batch(self) -> None:
         inputs = [Path(self.list_widget.item(i).text()) for i in range(self.list_widget.count())]
         if not inputs:
-            QMessageBox.warning(self, "Missing", "Please add videos.")
+            QMessageBox.warning(self, "Thiếu dữ liệu", "Vui lòng thêm video.")
             return
         output = self.output_dir or Path.cwd() / "output_processed"
         output.mkdir(parents=True, exist_ok=True)
@@ -436,13 +437,13 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         output = str(self.output_dir or (Path.cwd() / "output_processed"))
         self.settings.setValue("last_openable_output", output)
-        self.log(f"Done. success={ok}, fail={fail}")
+        self.log(f"Hoàn tất. thành công={ok}, fail={fail}")
         if self.auto_open.isChecked() and Path(output).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(output))
 
     def closeEvent(self, event) -> None:
         if self.worker and self.worker.isRunning():
-            QMessageBox.information(self, "Processing", "Đang xử lý. Vui lòng chờ hoàn tất trước khi đóng.")
+            QMessageBox.information(self, "Đang xử lý", "Đang xử lý, vui lòng chờ hoàn tất trước khi đóng.")
             event.ignore()
             return
         event.accept()
