@@ -8,11 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QSettings, Qt, QThread, Signal, QUrl
+from PySide6.QtCore import QSettings, QThread, Signal, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -22,7 +24,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
-    QRadioButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -48,6 +49,7 @@ class ProcessConfig:
     single_image: Optional[Path]
     image_folder: Optional[Path]
     focus_mode: str  # center|top|bottom
+    overlap_pct_of_main: float
     auto_open: bool
 
 
@@ -85,9 +87,10 @@ class VideoEngine:
         self.runner = runner
         self.log = logger
 
-    def process_one(self, input_video: Path, output_dir: Path, image_file: Optional[Path], focus_mode: str) -> Path:
-        with tempfile.TemporaryDirectory(prefix="shuffle_") as td:
-            work = Path(td)
+    def process_one(self, input_video: Path, output_dir: Path, image_file: Optional[Path], focus_mode: str, overlap_pct_of_main: float) -> Path:
+        td = tempfile.mkdtemp(prefix="shuffle_")
+        work = Path(td)
+        try:
             spec = self.runner.probe_video(input_video)
             self.log(f"[{input_video.name}] video={spec.width}x{spec.height} duration={spec.duration:.2f}s")
             audio = work / "audio.aac"
@@ -102,12 +105,26 @@ class VideoEngine:
             self._concat_segments(shuffled_parts, shuffled)
 
             if image_file:
-                self._compose_layout(shuffled, image_file, spec, focus_mode, composed)
+                self._compose_layout(shuffled, image_file, spec, focus_mode, overlap_pct_of_main, composed)
             else:
                 composed = shuffled
 
             self._mux_audio(composed, audio, final_out)
             return final_out
+        finally:
+            self._safe_cleanup_dir(work)
+
+    def _safe_cleanup_dir(self, path: Path) -> None:
+        import shutil
+        import time
+
+        for _ in range(8):
+            try:
+                shutil.rmtree(path, ignore_errors=False)
+                return
+            except PermissionError:
+                time.sleep(0.25)
+        shutil.rmtree(path, ignore_errors=True)
 
     def _extract_audio(self, video: Path, audio: Path) -> None:
         self.runner.run(["-y", "-i", str(video), "-vn", "-acodec", "copy", str(audio)])
@@ -158,10 +175,11 @@ class VideoEngine:
         concat_file.write_text("\n".join(f"file {shlex.quote(str(p))}" for p in parts), encoding="utf-8")
         self.runner.run(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(out)])
 
-    def _compose_layout(self, video: Path, image: Path, spec: VideoSpec, focus: str, out: Path) -> None:
+    def _compose_layout(self, video: Path, image: Path, spec: VideoSpec, focus: str, overlap_pct_of_main: float, out: Path) -> None:
         w, h = spec.width, spec.height
         main_h = int(h * 0.65)
-        overlap_h = max(2, int(h * 0.05))
+        overlap_h = max(2, int(main_h * (overlap_pct_of_main / 100.0)))
+        overlap_h = min(overlap_h, main_h)
         image_h = h - main_h
         visible_video_total = int(h * 0.70)
         offset_main = max(0, h - visible_video_total)
@@ -214,7 +232,7 @@ class Worker(QThread):
         for i, video in enumerate(self.cfg.input_videos, start=1):
             try:
                 image = self.pick_image() if self.cfg.image_mode != "none" else None
-                out = engine.process_one(video, self.cfg.output_dir, image, self.cfg.focus_mode)
+                out = engine.process_one(video, self.cfg.output_dir, image, self.cfg.focus_mode, self.cfg.overlap_pct_of_main)
                 self.log_signal.emit(f"OK: {out}")
                 ok += 1
             except Exception as exc:
@@ -267,12 +285,22 @@ class MainWindow(QMainWindow):
         self.image_label = QLabel("Image mode: none")
         layout.addWidget(self.image_label)
 
-        self.focus_center = QRadioButton("Focus Center")
-        self.focus_top = QRadioButton("Focus Top")
-        self.focus_bottom = QRadioButton("Focus Bottom")
-        self.focus_center.setChecked(True)
-        frow = QHBoxLayout(); frow.addWidget(self.focus_center); frow.addWidget(self.focus_top); frow.addWidget(self.focus_bottom)
-        layout.addLayout(frow)
+        focus_row = QHBoxLayout()
+        focus_row.addWidget(QLabel("Image crop focus"))
+        self.focus_combo = QComboBox()
+        self.focus_combo.addItems(["center", "top", "bottom"])
+        focus_row.addWidget(self.focus_combo)
+        layout.addLayout(focus_row)
+
+        overlap_row = QHBoxLayout()
+        overlap_row.addWidget(QLabel("Fade overlap (% of main video height)"))
+        self.overlap_spin = QDoubleSpinBox()
+        self.overlap_spin.setRange(1.0, 50.0)
+        self.overlap_spin.setDecimals(1)
+        self.overlap_spin.setSingleStep(0.5)
+        self.overlap_spin.setValue(7.7)
+        overlap_row.addWidget(self.overlap_spin)
+        layout.addLayout(overlap_row)
 
         self.auto_open = QCheckBox("Auto open output folder after processing")
         layout.addWidget(self.auto_open)
@@ -362,11 +390,7 @@ class MainWindow(QMainWindow):
         else:
             image_mode = "none"
 
-        focus = "center"
-        if self.focus_top.isChecked():
-            focus = "top"
-        elif self.focus_bottom.isChecked():
-            focus = "bottom"
+        focus = self.focus_combo.currentText()
 
         cfg = ProcessConfig(
             input_videos=inputs,
@@ -375,6 +399,7 @@ class MainWindow(QMainWindow):
             single_image=self.single_image,
             image_folder=self.image_folder,
             focus_mode=focus,
+            overlap_pct_of_main=self.overlap_spin.value(),
             auto_open=self.auto_open.isChecked(),
         )
         self.worker = Worker(cfg)
@@ -398,6 +423,13 @@ class MainWindow(QMainWindow):
         self.log(f"Done. success={ok}, fail={fail}")
         if self.auto_open.isChecked() and Path(output).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(output))
+
+    def closeEvent(self, event) -> None:
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "Processing", "Đang xử lý. Vui lòng chờ hoàn tất trước khi đóng.")
+            event.ignore()
+            return
+        event.accept()
 
 
 def main() -> None:
