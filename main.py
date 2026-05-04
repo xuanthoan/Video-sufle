@@ -64,9 +64,13 @@ class FFmpegRunner:
         local = Path(sys.argv[0]).resolve().parent / exe
         return str(local) if local.exists() else exe
 
-    def run(self, args: Sequence[str]) -> None:
+    def run(self, args: Sequence[str], step: str = "") -> None:
         cmd = [self.ffmpeg, *args]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            tail = "\n".join(result.stderr.splitlines()[-20:])
+            prefix = f"[{step}] " if step else ""
+            raise RuntimeError(f"{prefix}FFmpeg failed (code={result.returncode})\n{tail}")
 
     def run_capture(self, args: Sequence[str]) -> str:
         cmd = [self.ffprobe, *args]
@@ -98,17 +102,25 @@ class VideoEngine:
             composed = work / "composed.mp4"
             final_out = output_dir / f"{input_video.stem}_processed.mp4"
 
+            self.log("  Step 1/6: Extract audio")
             self._extract_audio(input_video, audio)
+            self.log("  Step 2/6: Scene detection")
             scenes = self._detect_or_fallback_scenes(input_video, spec.duration)
+            self.log(f"  Detected/Generated segments: {len(scenes)}")
+            self.log("  Step 3/6: Cut segments")
             parts = self._cut_segments(input_video, scenes, work)
+            self.log("  Step 4/6: Shuffle + concat")
             shuffled_parts = self._shuffle_keep_first(parts)
             self._concat_segments(shuffled_parts, shuffled)
 
             if image_file:
+                self.log("  Step 5/6: Compose image + fade layout")
                 self._compose_layout(shuffled, image_file, spec, focus_mode, overlap_pct_of_main, composed)
             else:
+                self.log("  Step 5/6: Skip image compose (no image selected)")
                 composed = shuffled
 
+            self.log("  Step 6/6: Mux audio")
             self._mux_audio(composed, audio, final_out)
             return final_out
         finally:
@@ -127,7 +139,7 @@ class VideoEngine:
         shutil.rmtree(path, ignore_errors=True)
 
     def _extract_audio(self, video: Path, audio: Path) -> None:
-        self.runner.run(["-y", "-i", str(video), "-vn", "-acodec", "copy", str(audio)])
+        self.runner.run(["-y", "-i", str(video), "-vn", "-acodec", "copy", str(audio)], step="extract_audio")
 
     def _detect_or_fallback_scenes(self, video: Path, duration: float) -> List[Tuple[float, float]]:
         scene_list: List[Tuple[float, float]] = []
@@ -158,7 +170,7 @@ class VideoEngine:
             seg = work / f"seg_{idx:04d}.mp4"
             self.runner.run([
                 "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(video), "-c", "copy", str(seg),
-            ])
+            ], step=f"cut_segment_{idx}")
             out.append(seg)
         return out
 
@@ -173,7 +185,7 @@ class VideoEngine:
     def _concat_segments(self, parts: List[Path], out: Path) -> None:
         concat_file = out.parent / "concat.txt"
         concat_file.write_text("\n".join(f"file {shlex.quote(str(p))}" for p in parts), encoding="utf-8")
-        self.runner.run(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(out)])
+        self.runner.run(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(out)], step="concat")
 
     def _compose_layout(self, video: Path, image: Path, spec: VideoSpec, focus: str, overlap_pct_of_main: float, out: Path) -> None:
         w, h = spec.width, spec.height
@@ -206,13 +218,13 @@ class VideoEngine:
             "-y", "-i", str(video), "-loop", "1", "-i", str(image),
             "-filter_complex", filter_complex,
             "-map", "[v]", "-shortest", "-c:v", "libx264", "-preset", "medium", "-crf", "18", str(out)
-        ])
+        ], step="compose_layout")
 
     def _mux_audio(self, video: Path, audio: Path, out: Path) -> None:
         try:
-            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "copy", "-c:a", "aac", "-shortest", str(out)])
-        except subprocess.CalledProcessError:
-            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "libx264", "-c:a", "aac", "-shortest", str(out)])
+            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "copy", "-c:a", "aac", "-shortest", str(out)], step="mux_audio_copy")
+        except Exception:
+            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "libx264", "-c:a", "aac", "-shortest", str(out)], step="mux_audio_fallback")
 
 
 class Worker(QThread):
@@ -229,7 +241,10 @@ class Worker(QThread):
         engine = VideoEngine(runner, self.log_signal.emit)
         ok = 0
         fail = 0
+        total = len(self.cfg.input_videos)
+        self.log_signal.emit(f"Batch started: {total} videos")
         for i, video in enumerate(self.cfg.input_videos, start=1):
+            self.log_signal.emit(f"=== [{i}/{total}] {video.name} ===")
             try:
                 image = self.pick_image() if self.cfg.image_mode != "none" else None
                 out = engine.process_one(video, self.cfg.output_dir, image, self.cfg.focus_mode, self.cfg.overlap_pct_of_main)
@@ -238,7 +253,8 @@ class Worker(QThread):
             except Exception as exc:
                 self.log_signal.emit(f"FAIL: {video.name} -> {exc}")
                 fail += 1
-            self.progress_signal.emit(i, len(self.cfg.input_videos))
+            self.progress_signal.emit(i, total)
+        self.log_signal.emit("Batch finished")
         self.done_signal.emit(ok, fail)
 
     def pick_image(self) -> Optional[Path]:
