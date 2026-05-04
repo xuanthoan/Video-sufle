@@ -1,5 +1,6 @@
 import json
 import random
+import re
 import shlex
 import shutil
 import subprocess
@@ -85,6 +86,13 @@ class VideoEngine:
         if self.stop_check():
             raise RuntimeError("Đã dừng theo yêu cầu người dùng")
 
+    @staticmethod
+    def _safe_output_stem(stem: str, max_len: int = 110) -> str:
+        cleaned = re.sub(r"[^\w\-. ]+", "_", stem, flags=re.UNICODE).strip(" ._")
+        if not cleaned:
+            cleaned = "video"
+        return cleaned[:max_len].rstrip(" ._") or "video"
+
     def process_one(self, input_video: Path, output_dir: Path, image_file: Optional[Path], focus_mode: str, overlap_pct_of_main: float) -> Path:
         td = tempfile.mkdtemp(prefix="shuffle_")
         work = Path(td)
@@ -94,7 +102,8 @@ class VideoEngine:
             audio = work / "audio.aac"
             shuffled = work / "shuffled.mp4"
             composed = work / "composed.mp4"
-            final_out = output_dir / f"{input_video.stem}_processed.mp4"
+            safe_stem = self._safe_output_stem(input_video.stem)
+            final_out = output_dir / f"{safe_stem}_processed.mp4"
 
             self.ensure_not_stopped(); self.log("  Bước 1/6: Tách audio")
             self.runner.run(["-y", "-i", str(input_video), "-vn", "-acodec", "copy", str(audio)], "extract_audio")
@@ -184,9 +193,9 @@ class VideoEngine:
 
     def _mux_audio(self, video: Path, audio: Path, out: Path) -> None:
         try:
-            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "copy", "-c:a", "aac", "-shortest", str(out)], "mux_copy")
+            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", "-shortest", str(out)], "mux_copy")
         except Exception:
-            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "libx264", "-c:a", "aac", "-shortest", str(out)], "mux_fallback")
+            self.runner.run(["-y", "-i", str(video), "-i", str(audio), "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", "-shortest", str(out)], "mux_fallback")
 
 
 class Worker(QThread):
@@ -298,7 +307,8 @@ class MainWindow(QMainWindow):
         inputs=[Path(self.list_widget.item(i).text()) for i in range(self.list_widget.count())]
         if not inputs:
             QMessageBox.warning(self,"Thiếu dữ liệu","Vui lòng thêm video."); return
-        out=self.output_dir or Path.cwd()/"output_processed"; out.mkdir(parents=True, exist_ok=True)
+        default_out = Path.home() / "Videos" / "output_processed"
+        out=self.output_dir or default_out; out.mkdir(parents=True, exist_ok=True)
         cfg=ProcessConfig(inputs,out,self.image_files,self.focus_combo.currentText(),self.overlap_spin.value(),self.auto_open.isChecked())
         self.worker=Worker(cfg)
         self.worker.log_signal.connect(self.log)
@@ -317,7 +327,7 @@ class MainWindow(QMainWindow):
 
     def on_done(self, ok: int, fail: int):
         self.btn_start.setEnabled(True)
-        output=str(self.output_dir or (Path.cwd()/"output_processed"))
+        output=str(self.output_dir or (Path.home() / "Videos" / "output_processed"))
         self.settings.setValue("last_openable_output",output)
         self.log(f"Hoàn tất. thành công={ok}, lỗi={fail}")
         if self.auto_open.isChecked() and Path(output).exists(): QDesktopServices.openUrl(QUrl.fromLocalFile(output))
