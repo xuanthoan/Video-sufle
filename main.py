@@ -177,8 +177,8 @@ class VideoEngine:
         # Quy tắc ảnh: nếu nhỏ hơn W -> scale tăng lên W; nếu >= W -> không scale, crop trực tiếp.
         img_chain = f"scale='if(lt(iw,{w}),{w},iw)':-1,crop={w}:{image_h}:0:{y_expr}"
         fc = (
-            f"[1:v]{img_chain},trim=duration={duration:.3f}[img];"
-            f"[0:v]crop={w}:{main_h}:0:{offset_main},trim=duration={duration:.3f}[main];"
+            f"[1:v]{img_chain},trim=duration={duration:.3f},setpts=PTS-STARTPTS[img];"
+            f"[0:v]settb=AVTB,setpts=PTS-STARTPTS,crop={w}:{main_h}:0:{offset_main},trim=duration={duration:.3f},setpts=PTS-STARTPTS[main];"
             f"[main]crop={w}:{overlap_h}:0:{main_h-overlap_h},format=yuva420p,geq=lum='p(X,Y)':a='255*(1-Y/{overlap_h})'[fade];"
             f"color=c=black:s={w}x{h}:d={duration:.3f}[base];"
             f"[base][img]overlay=0:{h-image_h}[tmp1];"
@@ -186,7 +186,7 @@ class VideoEngine:
             f"[tmp2][fade]overlay=0:{main_h}[v]"
         )
         self.runner.run([
-            "-y", "-i", str(video), "-loop", "1", "-t", f"{duration:.3f}", "-i", str(image),
+            "-y", "-fflags", "+genpts", "-i", str(video), "-loop", "1", "-t", f"{duration:.3f}", "-i", str(image),
             "-filter_complex", fc, "-map", "[v]", "-t", f"{duration:.3f}", "-shortest",
             "-c:v", "libx264", "-preset", "medium", "-crf", "18", str(out)
         ], "compose")
